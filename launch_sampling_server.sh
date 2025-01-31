@@ -33,6 +33,7 @@ do
         --model $server_engine \
         --port 802${gpu_idx} \
         --tensor-parallel-size 1 \
+        --gpu-memory-utilization 0.7 \
         --load-format auto \
         --dtype float16 \
         --download-dir ./download_dir > logs/server_${gpu_idx}.log 2>&1 &
