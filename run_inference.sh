@@ -16,9 +16,9 @@ echo "Model engine is: $model_engine"
 echo "Shard nums is: $SHARD_NUMS"
 echo "Shard index is: $SHARD_IDX"
 
-bash launch_sampling_server.sh $model_engine
+# bash launch_sampling_server.sh $model_engine
 
-for bestn in 32; do
+for bestn in 8; do
     filename_with_extension=$(basename "$input_data")
     filename="${filename_with_extension%.jsonl}"
 
