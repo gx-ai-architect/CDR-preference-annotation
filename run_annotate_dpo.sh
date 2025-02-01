@@ -16,7 +16,7 @@ mkdir -p logs
 
 echo "Input Source is: $input_data"
 
-# bash launch_reward_server_para.sh $pref_model $ref_model
+bash launch_reward_server_para.sh $pref_model $ref_model
 
 # Run bon scoring
 python scripts/run_bon_scoring.py \
