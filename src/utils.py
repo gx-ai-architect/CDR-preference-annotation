@@ -97,6 +97,7 @@ def read_jsonl(path):
 MERLINITE_SYSTEM= "<|system|>\nYou are an AI language model developed by IBM Research. You are a cautious assistant. You carefully follow instructions. You are helpful and harmless and you follow ethical guidelines and promote positive behavior."
 ASSISTANT = "\n<|assistant|>\n"
 USER = "\n<|user|>\n"
+REDHAT_SYSTEM = "<|system|>\nI am a Red Hat® Instruct Model, an AI language model developed by Red Hat and IBM Research based on the granite-3.1-8b-base model. My primary role is to serve as a chat assistant."
 
 def convert_llamas_to_json_format(input_string):
     user_symbol = "<|start_header_id|>user<|end_header_id|>"
@@ -112,7 +113,7 @@ def convert_llamas_to_json_format(input_string):
     return msgs
 
 
-def convert_to_json_format(input_string, system_prompt=MERLINITE_SYSTEM):
+def convert_to_json_format(input_string, system_prompt=REDHAT_SYSTEM):
     
     # Remove the system prompt at the beginning if it exists
     if input_string.startswith(system_prompt):
@@ -205,6 +206,7 @@ def load_simple_dataset(
     logger: logging.Logger = None,
     keep_columns: List[str] = ["text", "id"],
     max_prompt_length=1500,
+    max_output_length=1024,
 ) -> Dataset:
     """
     Loads either the core eval set for HERM or the existing preference data test sets.
@@ -238,21 +240,12 @@ def load_simple_dataset(
             logger.info("*** Preparing dataset using tokenizer chat-template ***")
         dataset = raw_dataset.map(
             prepare_dialogue_from_tokenizer,
-            fn_kwargs={"tokenizer": tokenizer, "max_prompt_length":max_prompt_length},
+            fn_kwargs={"tokenizer": tokenizer, "max_prompt_length":max_prompt_length, "max_output_length":max_output_length},
             num_proc=8,
             load_from_cache_file=False,
         )
     else:
         raise Exception("No chat formatter is available in tokenizer")
-    # elif conv is not None:
-    #     if logger is not None:
-    #         logger.info("*** Preparing dataset with FastChat ***")
-    #     dataset = raw_dataset.map(
-    #         prepare_fastchat_conv,
-    #         fn_kwargs={"dialogue_template": conv, "tokenizer": tokenizer, "max_prompt_length":max_prompt_length},
-    #         num_proc=1,
-    #         load_from_cache_file=False,
-    #     )
 
     # remove columns if set and not custom_dialogue_formatting
     all_cols = dataset.column_names
@@ -279,6 +272,7 @@ def prepare_dialogue_from_tokenizer(
     example: Dict[str, Any],
     tokenizer: PreTrainedTokenizer,
     max_prompt_length=800,
+    max_output_length=1024,
 ) -> Dict[str, Any]:
     if all(k in example.keys() for k in ["prompt", "response"]):
         # multi turn
@@ -304,7 +298,7 @@ def prepare_dialogue_from_tokenizer(
                 tokenize=False,
             )
 
-            formatted_prompt, formatted_output = truncate_prompt(tokenizer, formatted_prompt, formatted_output, max_prompt_length=max_prompt_length)
+            formatted_prompt, formatted_output = truncate_prompt(tokenizer, formatted_prompt, formatted_output, max_prompt_length=max_prompt_length, max_output_length=max_output_length)
 
             example["formatted_output"] = formatted_output + tokenizer.eos_token if not formatted_output.endswith(tokenizer.eos_token) else formatted_output
             example["prompt"] = formatted_prompt
@@ -319,48 +313,3 @@ def prepare_dialogue_from_tokenizer(
             f"Require `[response]` keys but found {list(example.keys())}"
         )
     return example
-
-
-
-def prepare_fastchat_conv(
-    example: Dict[str, Any],
-    dialogue_template: Conversation,
-    tokenizer: PreTrainedTokenizer,
-    max_prompt_length: int,
-) -> Dict[str, Any]:
-    """Format example to single- or multi-turn dialogue."""
-    if all(k in example.keys() for k in (["prompt", "response"])):
-        # multi turn
-        if isinstance(example["prompt"], list) and len(example["prompt"]) > 0:
-            # iterate through prompt messages, alternate user and assistant, end with example["chosen"]/rejected
-            dialogue_template.messages = []
-            for i, (line) in enumerate(example["prompt"]):
-                p = line["content"]
-                _ = line["role"]
-                if (i + 1) % 2 == 1:
-                    dialogue_template.messages.append([dialogue_template.roles[0], p])
-                else:
-                    dialogue_template.messages.append([dialogue_template.roles[1], p])
-            # assert that the last message before this is user
-            assert dialogue_template.messages[-1][0] == dialogue_template.roles[0]
-
-            # needed for DPO
-            formatted_prompt = dialogue_template.get_prompt()
-
-            # end with chosen/rejected
-            dialogue_template.messages.append([dialogue_template.roles[1], example["response"]])
-            formatted_prompt, formatted_output = truncate_prompt(tokenizer, formatted_prompt, dialogue_template.get_prompt(), max_prompt_length=max_prompt_length)
-            example["formatted_output"] = formatted_output + tokenizer.eos_token if not formatted_output.endswith(tokenizer.eos_token) else formatted_output
-            example["prompt"] = formatted_prompt
-            example["messages"] = dialogue_template.messages
-        else:
-            # single turn
-            # needed for DPO
-            raise Exception("prompt must be a list of content")
-    else:
-        raise ValueError(
-            "Could not format example as dialogue for `rm` task!"
-            f"Require `[chosen, rejected]` keys but found {list(example.keys())}"
-        )
-    return example
-

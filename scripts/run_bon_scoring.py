@@ -26,15 +26,19 @@ from fastchat.conversation import get_conv_template
 from tqdm import tqdm
 from datasets import Dataset
 import math
-from src import DPO_MODEL_CONFIG, save_to_local, convert_to_json_format, DPOInferenceVLLM, load_simple_dataset, LogratioHF
-from src.utils import convert_llamas_to_json_format
+from src import save_to_local, convert_to_json_format, DPOInferenceVLLM, load_simple_dataset
+from src.utils import convert_llamas_to_json_format, convert_to_json_format
 from src.prompts import SYSTEM_PROMPTS_MAP, DOMAIN_MAP
 import json 
 import pandas as pd
-from transformers import AutoTokenizer
 from multiprocessing import Process, Manager
 import random
-
+from transformers import (
+    AutoModelForCausalLM,
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    pipeline,
+)
 
 # get token from HF_TOKEN env variable, but if it doesn't exist pass none
 HF_TOKEN = os.getenv("HF_TOKEN", None)
@@ -90,10 +94,13 @@ def load_ibm_bon_data(data_path, debug=False, add_system_prompt=None, add_user_p
     id=0
     for instance in data:
         prompt = instance["prompt"]
+
         if "prompt_messages" in instance:
             raw_prompt = instance["prompt_messages"]
         elif "llama" in instance["decoder_name_or_path"].lower():
             raw_prompt = convert_llamas_to_json_format(prompt)
+        elif "granite" in instance["decoder_name_or_path"].lower():
+            raw_prompt = convert_to_json_format(prompt)
         else:
             # TODO: support more models' parsing
             raise ValueError(f"Unsupported prompt format for model {instance['decoder_name_or_path']}. Please implement prompt parsing for this model.")
@@ -180,6 +187,7 @@ def get_args():
     parser.add_argument("--do_not_save", action="store_false", help="do not save results to hub (for debugging)")
     parser.add_argument("--batch_size", type=int, default=4, help="batch size for inference")
     parser.add_argument("--max_prompt_length", type=int, default=1024, help="max prompt length")
+    parser.add_argument("--max_output_length", type=int, default=1024, help="max output length")
     parser.add_argument("--num_threads", type=int, default=1, help="how many threads to submit")
     parser.add_argument("--base_port", type=int, default=8020, help="the base_port to infer other ports to make API calls for")
     parser.add_argument(
@@ -190,9 +198,6 @@ def get_args():
     )
     parser.add_argument(
         "--trust_remote_code", action="store_true", default=False, help="directly load model instead of pipeline"
-    )
-    parser.add_argument(
-        "--hf_logratio_inference", action="store_true", default=False, help="Use local huggingface serving of model; rather than vllm serving"
     )
     parser.add_argument("--debug", action="store_true", default=False, help="use only 10 examples")
     parser.add_argument(
@@ -236,6 +241,7 @@ def reward_annotation(pref_port, ref_port, chunked_data_dict, args, thread_idx, 
         collate_fn = lambda x: x, # fix weird batching error
         shuffle=False,
         drop_last=False,
+        num_workers=16
     )
 
     all_result_dicts= []
@@ -288,40 +294,6 @@ def reward_annotation_single(pref_port, ref_port, dataset, args):
         all_result_dicts += result_dicts
     return all_result_dicts
 
-def hf_logratio_annotation(dataset, args):
-    ############################
-    # Load reward model pipeline
-    ############################
-
-    BATCH_SIZE = args.batch_size
-    model = args.model
-    ref_model =  args.ref_model
-    
-    tokenizer_path = args.tokenizer if args.tokenizer else args.model
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-    # use internal inference functions in DPO trainer
-    hf_logratio_annotator = LogratioHF(
-        model,
-        ref_model,
-        tokenizer,
-    )
-
-    dataloader = torch.utils.data.DataLoader(
-        dataset,
-        batch_size=BATCH_SIZE,
-        collate_fn = lambda x: x, # fix weird batching error
-        shuffle=False,
-        drop_last=False,
-    )
-
-    all_result_dicts= []
-
-    for step, batch in enumerate(tqdm(dataloader, desc="RM batch steps")):
-        print(f"RM inference step {step}/{len(dataloader)}")
-        result_dicts = hf_logratio_annotator.monolithic_inference_step(batch)
-        all_result_dicts += result_dicts
-    return all_result_dicts
-
 
 def singular_classifier_thread(model_name, device_id, chunked_data_dict, results):
     chunk_data_hf = chunked_data_dict[device_id]
@@ -365,10 +337,10 @@ def main():
         logger.info("Loading model with Trust Remote Code")
 
     if args.model_type == "dpo":
-        if args.model in DPO_MODEL_CONFIG:
-            config = DPO_MODEL_CONFIG[args.model]
-        else:
-            config = DPO_MODEL_CONFIG["default"]
+        config = {
+            "model_builder": AutoModelForCausalLM.from_pretrained,
+            "tokenizer_builder": AutoTokenizer.from_pretrained,
+        },
         logger.info(f"Using dpo model config: {config}")
         assert args.model != args.ref_model, "policy and reference model should be different"
     else:
@@ -396,6 +368,7 @@ def main():
                 raise ValueError(f"Failed to load tokenizer after {max_retry} retries")
             print(f"Failed to load tokenizer, retrying...")
     tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.truncation_side = "right"
 
     if args.insert_system_prompt:
         assert args.insert_system_prompt in SYSTEM_PROMPTS_MAP, "System prompt not found in SYSTEM_PROMPTS_MAP"
@@ -411,7 +384,8 @@ def main():
         tokenizer=tokenizer,
         logger=logger,
         keep_columns=["formatted_output", "prompt", "original_prompt", "response", "messages"],
-        max_prompt_length=args.max_prompt_length
+        max_prompt_length=args.max_prompt_length,
+        max_output_length=args.max_output_length
     )
 
     print("#################### Example Formatted Prompt Messages ####################\n")
@@ -452,64 +426,43 @@ def main():
     if args.model_type != "dpo":
         logger.info("Using a sequence classifier reward model")
 
-    # if not args.debug and not args.hf_logratio_inference:
-    if not args.hf_logratio_inference:
-        manager = Manager()
-        results = manager.dict()
-        processes = []
-        chunked_data_dict = {}
-        base_port = args.base_port
-        gpu_chunk_size = int(len(simple_dataset)/args.num_threads)+1
-  
-        for thread_idx in range(args.num_threads):
+    manager = Manager()
+    results = manager.dict()
+    processes = []
+    chunked_data_dict = {}
+    base_port = args.base_port
+    gpu_chunk_size = int(len(simple_dataset)/args.num_threads)+1
 
-            start_idx = thread_idx * gpu_chunk_size
-            end_idx = min(len(simple_dataset), start_idx + gpu_chunk_size)
-            thread_dataset = simple_dataset.select(range(start_idx, end_idx))
-            chunked_data_dict[thread_idx] = thread_dataset
-            pref_port = base_port
-            ref_port = base_port + 1
-            base_port+=2
+    for thread_idx in range(args.num_threads):
 
-            if thread_dataset and len(thread_dataset)>0:
-                if args.model_type == "dpo":
-                    processes.append(
-                        Process(target=reward_annotation, args=(pref_port, ref_port, chunked_data_dict, args, thread_idx, results)),
-                    )
-                else:
-                    processes.append(
-                        Process(target=singular_classifier_thread, args=(args.model, thread_idx, chunked_data_dict, results)),
-                    )
-     
-        for process in processes:
-            process.start()
+        start_idx = thread_idx * gpu_chunk_size
+        end_idx = min(len(simple_dataset), start_idx + gpu_chunk_size)
+        thread_dataset = simple_dataset.select(range(start_idx, end_idx))
+        chunked_data_dict[thread_idx] = thread_dataset
+        pref_port = base_port
+        ref_port = base_port + 1
+        base_port+=2
 
-        for process in processes:
-            process.join()
-
-        final_scores = []
-        for thread_idx in range(args.num_threads):
-            if thread_idx in results and results[thread_idx]:
-                final_scores.extend(results[thread_idx])
-    else:
-        if args.hf_logratio_inference:
-            final_scores = hf_logratio_annotation(simple_dataset, args)
-        
-        elif args.model_type == "dpo":
-            final_scores = reward_annotation_single(args.base_port, args.base_port + 1, simple_dataset, args)
-        else:
-
-            if "armo" in args.model.lower():
-                from src.models import ArmoRMPipeline
-                input_data = [instance['messages'] for instance in simple_dataset]
-                armopipeline = ArmoRMPipeline(args.model, device=0)
-                final_scores, _ = armopipeline(input_data)
+        if thread_dataset and len(thread_dataset)>0:
+            if args.model_type == "dpo":
+                processes.append(
+                    Process(target=reward_annotation, args=(pref_port, ref_port, chunked_data_dict, args, thread_idx, results)),
+                )
             else:
-                from src.models import BradleyTerryRMPipeline
-                input_data = [instance['messages'] for instance in simple_dataset]
+                processes.append(
+                    Process(target=singular_classifier_thread, args=(args.model, thread_idx, chunked_data_dict, results)),
+                )
+    
+    for process in processes:
+        process.start()
 
-                bt_pipeline = BradleyTerryRMPipeline(args.model, device=0)
-                final_scores = bt_pipeline(input_data)
+    for process in processes:
+        process.join()
+
+    final_scores = []
+    for thread_idx in range(args.num_threads):
+        if thread_idx in results and results[thread_idx]:
+            final_scores.extend(results[thread_idx])
 
 
     ############################
