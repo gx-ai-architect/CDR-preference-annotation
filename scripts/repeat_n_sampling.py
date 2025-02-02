@@ -53,7 +53,8 @@ def read_input_jsonl(path, decoder_name_or_path):
                     ex["formatted_input"] = ex["formatted_input"] + "<|start_header_id|>assistant<|end_header_id|>"
             else:
                 raise ValueError("Tokenizer is not chat template compatible")
-            ex["targets"] = ex["messages"][-1]["content"]
+            ex["targets"] = "None"
+
             data.append(ex)
     return data
 

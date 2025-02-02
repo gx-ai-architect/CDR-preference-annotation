@@ -97,8 +97,10 @@ def read_jsonl(path):
 MERLINITE_SYSTEM= "<|system|>\nYou are an AI language model developed by IBM Research. You are a cautious assistant. You carefully follow instructions. You are helpful and harmless and you follow ethical guidelines and promote positive behavior."
 ASSISTANT = "\n<|assistant|>\n"
 USER = "\n<|user|>\n"
+SYSTEM = "<|system|>\n"
 REDHAT_SYSTEM = "<|system|>\nI am a Red Hat® Instruct Model, an AI language model developed by Red Hat and IBM Research based on the granite-3.1-8b-base model. My primary role is to serve as a chat assistant."
 CLEAN_REDHAT_SYSTEM = "I am a Red Hat® Instruct Model, an AI language model developed by Red Hat and IBM Research based on the granite-3.1-8b-base model. My primary role is to serve as a chat assistant."
+R1_SYSTEM = "<|system|>\nA conversation between User and Assistant. The user asks a question, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer. The reasoning process and answer are enclosed within <begin_of_thought> <end_of_thought> and <begin_of_solution> <end_of_solution> tags, respectively, i.e., <begin_of_thought> reasoning process here <end_of_thought> <begin_of_solution> answer here <end_of_solution>."
 def convert_llamas_to_json_format(input_string):
     user_symbol = "<|start_header_id|>user<|end_header_id|>"
     eot_symbol = "<|eot_id|>"
@@ -113,17 +115,25 @@ def convert_llamas_to_json_format(input_string):
     return msgs
 
 
-def convert_to_json_format(input_string, system_prompt=REDHAT_SYSTEM):
+def convert_to_json_format(input_string, system_prompt=None):
     
     # Remove the system prompt at the beginning if it exists
-    if input_string.startswith(system_prompt):
+    if input_string.startswith(R1_SYSTEM):
+        input_string = input_string[len(R1_SYSTEM):]
+        system_prompt = R1_SYSTEM
+    elif input_string.startswith(REDHAT_SYSTEM):
+        input_string = input_string[len(REDHAT_SYSTEM):]
+        system_prompt = REDHAT_SYSTEM
+    elif system_prompt and input_string.startswith(system_prompt):
         input_string = input_string[len(system_prompt):]
-
     else:
         raise Exception("no system prompt found, error")
 
     # Split the remaining string by the user and assistant tags
-    segments = [{"content": CLEAN_REDHAT_SYSTEM, "role": "system"}]
+    if system_prompt == R1_SYSTEM:
+        segments = [{"content": R1_SYSTEM[len(SYSTEM):], "role": "system"}]
+    else:
+        segments = []
     temp = input_string
     assert temp.startswith(USER)
     role = None

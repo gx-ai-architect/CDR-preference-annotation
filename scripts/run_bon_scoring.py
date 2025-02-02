@@ -149,6 +149,10 @@ def load_ibm_bon_data(data_path, debug=False, add_system_prompt=None, add_user_p
                 ]
 
         output_candidates = instance["output"]
+        if raw_prompt[-1]['role'] == 'assistant' and "<begin_of_thought>" in raw_prompt[-1]['content']:
+            output_candidates = [ raw_prompt[-1]['content'] +text for text in output_candidates ]
+            raw_prompt = raw_prompt[:-1]
+        
         # write a code that is stable for random numbers of output_candidates > 0
         for can_idx in range(len(output_candidates)):
             pref_instance = {
