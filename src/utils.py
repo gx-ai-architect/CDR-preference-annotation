@@ -98,7 +98,7 @@ MERLINITE_SYSTEM= "<|system|>\nYou are an AI language model developed by IBM Res
 ASSISTANT = "\n<|assistant|>\n"
 USER = "\n<|user|>\n"
 REDHAT_SYSTEM = "<|system|>\nI am a Red Hat® Instruct Model, an AI language model developed by Red Hat and IBM Research based on the granite-3.1-8b-base model. My primary role is to serve as a chat assistant."
-
+CLEAN_REDHAT_SYSTEM = "I am a Red Hat® Instruct Model, an AI language model developed by Red Hat and IBM Research based on the granite-3.1-8b-base model. My primary role is to serve as a chat assistant."
 def convert_llamas_to_json_format(input_string):
     user_symbol = "<|start_header_id|>user<|end_header_id|>"
     eot_symbol = "<|eot_id|>"
@@ -118,11 +118,12 @@ def convert_to_json_format(input_string, system_prompt=REDHAT_SYSTEM):
     # Remove the system prompt at the beginning if it exists
     if input_string.startswith(system_prompt):
         input_string = input_string[len(system_prompt):]
+
     else:
         raise Exception("no system prompt found, error")
 
     # Split the remaining string by the user and assistant tags
-    segments = []
+    segments = [{"content": CLEAN_REDHAT_SYSTEM, "role": "system"}]
     temp = input_string
     assert temp.startswith(USER)
     role = None
