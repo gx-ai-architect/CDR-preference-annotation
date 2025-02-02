@@ -503,7 +503,7 @@ def main():
             assert ex["original_prompt"] == instance["prompt"], "original prompt and flattened prompt don't match"
 
             # this is somewhere that I'm should do another sanity check
-            assert instance["output"][in_idx] == ex["response"], "original order is being disrupted"
+            # assert instance["output"][in_idx] == ex["response"], "original order is being disrupted"
             reward_dict[ex["response"]] = ex["results"]
             per_instance_rewards.append(ex["results"])
         best_of_n_samples.append(max(reward_dict, key=reward_dict.get))

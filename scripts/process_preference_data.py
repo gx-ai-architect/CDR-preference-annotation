@@ -94,8 +94,22 @@ def print_RS_stats(sample_ls, ds_name):
     
     get_statistics([ex['messages'][-1]['content'] for ex in sample_ls])
 
+import re
 
-def load_and_format_dpo( data_dir, data_path="", model_name="mistralai/Mixtral-8x7B-Instruct-v0.1"):
+def syntax_reward(output):
+    regex = r"(?s).*?<begin_of_thought>((?!<begin_of_thought>).*?)<end_of_thought>.*?<begin_of_solution>((?!<begin_of_solution>).*?)<end_of_solution>.*$"
+
+
+    match = re.search(regex, output, re.DOTALL) 
+    # if the format is not correct, reward is 0
+    if match is None or len(match.groups()) != 2:
+        return 500
+    else:
+        return -500
+
+
+
+def load_and_format_dpo( data_dir, data_path="", model_name="mistralai/Mixtral-8x7B-Instruct-v0.1", format_reward=False):
     
     """
     Raw data formats:
@@ -134,6 +148,9 @@ def load_and_format_dpo( data_dir, data_path="", model_name="mistralai/Mixtral-8
         assert "<|user|>" not in msg_prompt
         assert "<|assistant|>" not in msg_prompt
 
+        if format_reward:
+            instance["output_reward_scores"] = [score + syntax_reward(output) for score, output in zip(instance["output_reward_scores"], instance["output"])]
+        
         worst_text = instance["output"][instance["output_reward_scores"].index(min(instance["output_reward_scores"]))]
         max_idx = instance["output_reward_scores"].index(max(instance["output_reward_scores"]))
         best_text_msg = msg + [{
@@ -190,7 +207,8 @@ if __name__ == "__main__":
             # "/new_data/gx/synthetic_preference/prefmix_granite8b_preview/preference_prompts-distribute"
             # "/new_data/gx/synthetic_preference/prefmix_sep23_granite8b_preview/preference_prompts-distribute"
             # "/new_data/gx/synthetic_preference/ultrafeedback_llama/ultrafeedback_seed-distribute/annotated_shards/"
-            "/new_data/gx/r1_pref/official_data/p10_reasoning_random_60k-distribute/"
+            # "/new_data/gx/r1_pref/official_data/p10_reasoning_random_60k-distribute/"
+            
             ]
 
     best_sample_ls, best_merlinite_sample_ls, filtered_model_best_ls = [], [], []
