@@ -6,6 +6,7 @@ import random
 import statistics
 import numpy as np
 from src.utils import convert_to_json_format
+from tqdm import tqdm
 
 def read_jsonl(path):
     data = []
@@ -103,9 +104,16 @@ def syntax_reward(output):
     match = re.search(regex, output, re.DOTALL) 
     # if the format is not correct, reward is 0
     if match is None or len(match.groups()) != 2:
-        return 500
+        return 5000
     else:
-        return -500
+        return -5000
+
+import pandas as pd
+from datasets import Dataset
+def list_to_dataset(data):
+    df = pd.DataFrame(data)
+    dataset = Dataset.from_pandas(df)
+    return dataset
 
 
 
@@ -135,9 +143,21 @@ def load_and_format_dpo( data_dir, data_path="", model_name="mistralai/Mixtral-8
     else:
         annotations = read_jsonl(data_path)
     
+    total_syntax_failure = 0
     dummy_score = 0 
     best_sample_ls, best_merlinite_sample_ls, best_filtered_sample_ls = [], [], []
-    for instance in annotations:
+
+    anno_ds = list_to_dataset(annotations)
+
+    if format_reward:   
+        annotations = anno_ds.map(
+            lambda x: {
+                "output_reward_scores": [score + syntax_reward(out) for score, out in zip(x["output_reward_scores"], x["output"])]
+            },
+            num_proc=128  # or another number based on your system
+        )
+
+    for instance in tqdm(annotations):
         if "llama" in instance["decoder_name_or_path"].lower():
             msg = convert_llamas_to_json_format(instance["prompt"])
         else:
@@ -149,7 +169,8 @@ def load_and_format_dpo( data_dir, data_path="", model_name="mistralai/Mixtral-8
         assert "<|assistant|>" not in msg_prompt
 
         if format_reward:
-            instance["output_reward_scores"] = [score + syntax_reward(output) for score, output in zip(instance["output_reward_scores"], instance["output"])]
+            
+            total_syntax_failure += sum([1 for score in instance["output_reward_scores"] if score < -3000])
         
         worst_text = instance["output"][instance["output_reward_scores"].index(min(instance["output_reward_scores"]))]
         max_idx = instance["output_reward_scores"].index(max(instance["output_reward_scores"]))
@@ -171,7 +192,7 @@ def load_and_format_dpo( data_dir, data_path="", model_name="mistralai/Mixtral-8
 
 
         # half of the time, exclude the shortest example from non_max sampling
-        if random.random() < 0.4:
+        if random.random() < 0.0:
             non_max_idx = [i for i in range(len(instance['output'])) if i != max_idx and i !=longest_idx]
         else:
             non_max_idx = [i for i in range(len(instance['output'])) if i != max_idx]
@@ -190,10 +211,10 @@ def load_and_format_dpo( data_dir, data_path="", model_name="mistralai/Mixtral-8
         }
         if best_sample['chosen'][-1]['content'] != best_sample['rejected'][-1]['content']:
             best_sample_ls.append(best_sample)
-  
+    
+
+    print(f"Total syntax failure: {total_syntax_failure}, Total: {len(best_sample_ls)}")
     return best_sample_ls, best_merlinite_sample_ls, best_filtered_sample_ls
-
-
 
 
 
@@ -208,13 +229,14 @@ if __name__ == "__main__":
             # "/new_data/gx/synthetic_preference/prefmix_sep23_granite8b_preview/preference_prompts-distribute"
             # "/new_data/gx/synthetic_preference/ultrafeedback_llama/ultrafeedback_seed-distribute/annotated_shards/"
             # "/new_data/gx/r1_pref/official_data/p10_reasoning_random_60k-distribute/"
-            
+            # "/new_data/gx/r1_pref/official_data/official_r1_reasoning_pt_correct-distribute/"
+            "/new_data/gx/r1_pref/official_data/pt_p10_rh_system_prompt-distribute"
             ]
 
     best_sample_ls, best_merlinite_sample_ls, filtered_model_best_ls = [], [], []
     for i, raw_data_dir in enumerate(data_dirs):
         # "RLHFlow/ArmoRM-Llama3-8B-v0.1"
-        best_sample_ls0, best_merlinite_sample_ls0, filtered_model_best_ls0 = load_and_format_dpo(raw_data_dir, model_name="Nous-Hermes-2-Mistral-7B-DPO")
+        best_sample_ls0, best_merlinite_sample_ls0, filtered_model_best_ls0 = load_and_format_dpo(raw_data_dir, model_name="Nous-Hermes-2-Mistral-7B-DPO", format_reward=False)
         
         print(f"########## Round-{i} ################################")
         best_sample_ls.extend(best_sample_ls0)
@@ -225,12 +247,43 @@ if __name__ == "__main__":
     # shuffle the final mix list
     random.shuffle(final_mix)
     print_DPO_stats(final_mix, "final_mix")
-
+    
     breakpoint()
     prefix = data_dirs[0]
+
+    data_name = "official_dpo_rh_bo8_random_rej_balanced"
     # save huggingface dataset to arrow format
-    # final_mix.save_to_disk(f"{prefix}/dpo_vanilla_bo8")
-    # save_as_jsonl(final_mix, f"{prefix}/dpo_vanilla_bo8.jsonl")
-    save_as_hf_dataset(final_mix, f"{prefix}/dpo_vanilla_bo8_random_rej")
+    save_as_hf_dataset(final_mix, f"{prefix}/{data_name}")
     breakpoint()
+    from huggingface_hub import login
+    login(token="your_token")
     
+
+
+    from datasets import Dataset, load_dataset, load_from_disk, DatasetDict
+    save_dir = f"{prefix}/{data_name}"
+    train_dir = f"{save_dir}/train"
+    test_dir = f"{save_dir}/test"
+
+    train_ds = load_from_disk(train_dir)
+    test_ds = load_from_disk(test_dir)
+
+
+    # remove messages, prompt columns
+    train_ds = train_ds.remove_columns(["messages", "prompt"])
+    test_ds = test_ds.remove_columns(["messages", "prompt"])
+
+    # add score_chosen, score_rejected columns; 
+    # assign dummy values of 0. 
+    train_ds = train_ds.add_column("score_chosen", [0] * len(train_ds))
+    train_ds = train_ds.add_column("score_rejected", [0] * len(train_ds))
+    test_ds = test_ds.add_column("score_chosen", [0] * len(test_ds))
+    test_ds = test_ds.add_column("score_rejected", [0] * len(test_ds))
+
+    # put them together into DatasetDict
+    ds = DatasetDict({"train": train_ds, "test": test_ds})
+
+    breakpoint()
+
+    ds.push_to_hub(data_name)
+
